@@ -1,0 +1,77 @@
+import json
+import boto3
+import pandas as pd
+import io
+from rapidfuzz import fuzz
+
+s3 = boto3.client('s3')
+
+def is_relevant_title(title):
+    title = str(title).lower()
+    if any(ex in title for ex in ['secr', 'vice', 'assistant', 'past', 'elect', 'trustee', 'officer', 'chairman']):
+        return False
+    score_president = fuzz.partial_ratio(title, 'president')
+    score_ceo = fuzz.partial_ratio(title, 'ceo')
+    score_owner = fuzz.partial_ratio(title, 'owner')
+    return score_president > 80 or score_ceo > 80 or score_owner > 80
+
+def lambda_handler(event, context):
+    # S3 bucket and keys
+    officers_bucket = 'cleaned-fceda-data'
+    officers_key = 'cleaned_data/Officer.csv'
+    metadata_bucket = 'cleaned-fceda-data'
+    metadata_key = 'fairfax_filtered/fairfax_filtered.csv'
+    output_bucket = 'merged-fceda-data'
+    output_key = 'merged_officers_data/fairfax_with_officers.csv'
+
+    # Load officer file
+    officers_obj = s3.get_object(Bucket=officers_bucket, Key=officers_key)
+    officers = pd.read_csv(io.BytesIO(officers_obj['Body'].read()), dtype=str)
+
+    # Load metadata file
+    metadata_obj = s3.get_object(Bucket=metadata_bucket, Key=metadata_key)
+    metadata = pd.read_csv(io.BytesIO(metadata_obj['Body'].read()), dtype=str)
+
+    # Filter officers by relevant titles
+    filtered_officers = officers[officers['OfficerTitle'].apply(is_relevant_title)]
+
+    # Merge metadata with filtered officers
+    merged = pd.merge(
+        metadata,
+        filtered_officers,
+        on='EntityID',
+        how='left',
+        suffixes=('', '_officer')
+    )
+
+    # Rename officer columns from the merged dataframe
+    merged = merged.rename(columns={
+        'OfficerFirstName_officer': 'OfficerFirstName',
+        'OfficerLastName_officer': 'OfficerLastName',
+        'OfficerTitle_officer': 'OfficerTitle'
+    })
+
+    # Reorder columns: move officer fields to the end
+    officer_cols = ['OfficerLastName', 'OfficerFirstName', 'OfficerTitle']
+    other_cols = [col for col in merged.columns if col not in officer_cols]
+    merged = merged[other_cols + officer_cols]
+
+    # Select only required columns (ensure all exist)
+    columns_to_keep = [
+        "EntityID", "Name", "Status", "IncorpDate", "IncorpState", "BuildingName", "Street1", "Street2",
+        "City", "State", "BusinessType", "ZIPCODE", "Shape__Area", "Shape__Length",
+        "Full_Address", "Latitude", "Longitude", 'OfficerFirstName', 'OfficerLastName', 'OfficerTitle'
+    ]
+    available_columns = [col for col in columns_to_keep if col in merged.columns]
+    merged = merged[available_columns]
+
+    # Save result to S3
+    csv_buffer = io.StringIO()
+    merged.to_csv(csv_buffer, index=False)
+    s3.put_object(Bucket=output_bucket, Key=output_key, Body=csv_buffer.getvalue())
+
+    # Return success message
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f"✅ {len(merged)} rows saved to s3://{output_bucket}/{output_key}")
+    }
