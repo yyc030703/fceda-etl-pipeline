@@ -73,5 +73,5 @@ def lambda_handler(event, context):
     # Return success message
     return {
         'statusCode': 200,
-        'body': json.dumps(f"✅ {len(merged)} rows saved to s3://{output_bucket}/{output_key}")
+        'body': json.dumps(f" {len(merged)} rows saved to s3://{output_bucket}/{output_key}")
     }
