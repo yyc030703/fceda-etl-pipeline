@@ -39,9 +39,9 @@ Prior to this project, FCEDA faced significant challenges:
 
 We designed a **serverless data processing and visualization platform** that:  
 
-- ⚡ **Automates** ingestion, cleaning, and standardization of Virginia business registration data  
-- 📍 **Geocodes** addresses to determine Fairfax County boundaries  
-- 📊 **Visualizes** data with a user-friendly Tableau dashboard  
+-  **Automates** ingestion, cleaning, and standardization of Virginia business registration data  
+-  **Geocodes** addresses to determine Fairfax County boundaries  
+-  **Visualizes** data with a user-friendly Tableau dashboard  
 
 ### 🔑 Key Components  
 - **AWS Lambda + S3:** Serverless pipeline for cleaning, merging, and enriching datasets  
