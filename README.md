@@ -59,12 +59,6 @@ We designed a **serverless data processing and visualization platform** that:
 - **AWS Elastic Container Registry (ECR)** – for Docker-based geospatial processing  
 - **Tableau** – real-time business data visualization  
 - **Pandas, GeoPandas, Boto3** – data processing and AWS integrations  
-
----
-
-## 🎥 Demo  
-
-- **[Watch Dashboard Walkthrough](#)** *(YouTube link)*  
  
 ---
 
