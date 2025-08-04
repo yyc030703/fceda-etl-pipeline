@@ -1,0 +1,149 @@
+import json
+import boto3
+import pandas as pd
+import io
+from datetime import datetime
+ 
+def lambda_handler(event, context):
+    """
+    This Lambda function:
+    - Geocodes all Fairfax County businesses.
+    - Input file (standardized_address.csv) already contains only Fairfax County businesses, pre-filtered during earlier cleaning stages.
+    - No additional city filtering is needed here.
+    - Uses AWS Location Service (ALS) to retrieve Latitude and Longitude for addresses.
+    """
+ 
+    # Connect to AWS services
+    s3 = boto3.client('s3')
+    location = boto3.client('location')
+ 
+    # SETTINGS (Update place_index_name before deploying)
+    place_index_name = 'FairfaxIndex' # Your AWS Location Service Place Index Name
+    bucket_name = 'merged-fceda-data'
+    joined_df_key = 'merged_data/standardized_address.csv'
+    date_str = datetime.now().strftime('%m_%d')
+    output_key = f'geocoded/geocoded_ready.csv'
+    final_geocoded_key = 'geocoded/geocoded_starred.csv'
+ 
+    # CONTROL: Should we geocode everything from scratch?
+    force_full_regeocode = False  # Set to True for a full geocode refresh (example: every 6 months)
+ 
+    try:
+        # Step 1: Load the cleaned and filtered Fairfax County businesses
+        joined_obj = s3.get_object(Bucket=bucket_name, Key=joined_df_key)
+        df_current = pd.read_csv(io.BytesIO(joined_obj['Body'].read()), encoding='utf-8-sig')
+        df_current.columns = df_current.columns.str.strip()
+        df_current['EntityID'] = df_current['EntityID'].astype(str).str.strip()
+ 
+        # Step 2: Try loading previously geocoded businesses
+        try:
+            final_obj = s3.get_object(Bucket=bucket_name, Key=final_geocoded_key)
+            df_final = pd.read_csv(io.BytesIO(final_obj['Body'].read()), encoding='utf-8-sig')
+            df_final.columns = df_final.columns.str.strip()
+            df_final['EntityID'] = df_final['EntityID'].astype(str).str.strip()
+        except s3.exceptions.NoSuchKey:
+            # If no previous geocoded file found, start fresh
+            df_final = pd.DataFrame(columns=[
+        'EntityID', 'Name', 'Status', 'IncorpDate', 'IncorpState',
+        'BuildingName', 'Street1', 'Street2', 'City', 'State',
+        'BusinessType', 'ZIPCODE', 'Full_Address', 'Shape__Area',
+        'Shape__Length', 'Latitude', 'Longitude'
+    ])
+        # Step 3: Decide whether to geocode everything or only new businesses
+        if force_full_regeocode:
+            df_to_geocode = df_current.copy()
+            df_to_geocode['Latitude'] = None
+            df_to_geocode['Longitude'] = None
+        else:
+            existing_ids = set(df_final['EntityID'])
+            df_to_geocode = df_current[~df_current['EntityID'].isin(existing_ids)].copy()
+  
+        # Step 5: Geocode addresses using AWS Location Service
+        latitudes = []
+        longitudes = []
+ 
+        for idx, row in df_to_geocode.iterrows():
+            address = row['Full_Address']
+            try:
+                response = location.search_place_index_for_text(
+                    IndexName=place_index_name,
+                    Text=address
+                )
+                if response['Results']:
+                    coords = response['Results'][0]['Place']['Geometry']['Point']
+                    longitudes.append(coords[0])  # Longitude comes first
+                    latitudes.append(coords[1])   # Then Latitude
+                else:
+                    longitudes.append(None)
+                    latitudes.append(None)
+            except Exception:
+                # If geocoding fails, save None for that record
+                longitudes.append(None)
+                latitudes.append(None)
+ 
+        # Step 6: Assign geocode results to the dataset
+        df_to_geocode['Latitude'] = latitudes
+        df_to_geocode['Longitude'] = longitudes
+
+        #LOG SUMMARY
+        total_input = len(df_current)
+        total_attempted = len(df_to_geocode)
+        already_geocoded = total_input - total_attempted
+        successful = df_to_geocode['Latitude'].notna().sum()
+        failed = df_to_geocode['Latitude'].isna().sum()
+        remaining_to_geocode = failed
+
+        #Build log message
+        summary_log = (
+            f"Geocoding Summary Report\n"
+            f"Total records in standardized_address.csv     : {total_input}\n"
+            f"Already geocoded records (skipped)            : {already_geocoded}\n"
+            f"Records attempted for geocoding               : {total_attempted}\n"
+            f"Successfully geocoded records                 : {successful}\n"
+            f"Failed geocodes                               : {failed}\n"
+            f"Remaining records to geocode in future runs   : {remaining_to_geocode}\n"
+        )
+
+        #Save summary log to S3
+        summary_key = f'geocoded-logs/geocode_summary_{date_str}.txt'
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=summary_key,
+            Body=summary_log.encode('utf-8')
+        )
+
+        
+        # Step 7: Update the master geocoded file
+        if force_full_regeocode:
+            df_final_updated = df_to_geocode[['EntityID', 'Name', 'Status', 'IncorpDate', 'IncorpState', 'BuildingName', 'Street1', 'Street2', 'City', 'State', 'BusinessType', 'ZIPCODE', 'Full_Address', 'Shape__Area', 'Shape__Length','Latitude', 'Longitude']]
+        else:
+            df_new = df_to_geocode[['EntityID', 'Name', 'Status', 'IncorpDate', 'IncorpState', 'BuildingName', 'Street1', 'Street2', 'City', 'State', 'BusinessType', 'ZIPCODE', 'Full_Address', 'Shape__Area', 'Shape__Length','Latitude', 'Longitude']].dropna()
+            df_final_updated = pd.concat([df_final, df_new]).drop_duplicates(subset=['EntityID'])
+ 
+        # Step 8: Merge the updated geocodes back into the full business list
+        df_merged = pd.merge(df_current, df_final_updated[['EntityID', 'Latitude', 'Longitude']], on='EntityID', how='left')
+
+ 
+        # Step 9: Save today's geocoded snapshot
+        buffer_output = io.BytesIO()
+        df_merged.to_csv(buffer_output, index=False)
+        buffer_output.seek(0)
+        s3.put_object(Bucket=bucket_name, Key=output_key, Body=buffer_output.getvalue())
+ 
+        # Step 10: Save updated cumulative master file
+        buffer_final = io.BytesIO()
+        df_final_updated[['EntityID', 'Latitude', 'Longitude']].to_csv(buffer_final, index=False)
+        buffer_final.seek(0)
+        s3.put_object(Bucket=bucket_name, Key=final_geocoded_key, Body=buffer_final.getvalue())
+ 
+        return {
+            'statusCode': 200,
+            'body': json.dumps(f"Success. Geocoded data saved to {output_key} and updated {final_geocoded_key}.")
+        }
+ 
+    except Exception as e:
+        # If an error happens, capture it and return it
+        return {
+            'statusCode': 500,
+            'body': json.dumps(f"Error occurred: {str(e)}")
+        }
