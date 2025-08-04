@@ -1,0 +1,84 @@
+import json
+import boto3
+import pandas as pd
+import io
+import re
+
+s3 = boto3.client('s3')
+
+# === Street abbreviation mapping ===
+abbreviation_map = {
+    r"\bRDG\b": "RIDGE",
+    r"\bRI\b": "RIDGE",
+    r"\bRD\b": "ROAD",
+    r"\bST\b": "STREET",
+    r"\bAVE\b": "AVENUE",
+    r"\bBLVD\b": "BOULEVARD",
+    r"\bCTR\b": "CENTER",
+    r"\bLN\b": "LANE",
+    r"\bDR\b": "DRIVE",
+    r"\bPL\b": "PLACE",
+    r"\bPKWY\b": "PARKWAY",
+    r"\bHWY\b": "HIGHWAY",
+}
+
+def normalize_address(addr):
+    addr = str(addr).upper()
+    addr = re.sub(r'[^\w\s]', '', addr)  # Remove punctuation
+    for pattern, replacement in abbreviation_map.items():
+        addr = re.sub(pattern, replacement, addr)
+    return addr.strip()
+
+def lambda_handler(event, context):
+    # === Define S3 paths ===
+    business_bucket = 'merged-fceda-data'
+    business_key = 'merged_officers_data/fairfax_with_officers.csv'
+    
+    building_bucket = 'cleaned-fceda-data'
+    building_key = 'cleaned_data/Building_Type_of_Construction.csv'
+    
+    output_bucket = 'merged-fceda-data'
+    output_key = 'merged_fairfax_building/fairfax_with_building.csv'
+    
+    # === Load building dataset ===
+    building_obj = s3.get_object(Bucket=building_bucket, Key=building_key)
+    building_df = pd.read_csv(io.BytesIO(building_obj['Body'].read()))
+    building_df.columns = building_df.columns.str.strip()
+    
+    # === Load business dataset ===
+    business_obj = s3.get_object(Bucket=business_bucket, Key=business_key)
+    business_df = pd.read_csv(io.BytesIO(business_obj['Body'].read()))
+    business_df.columns = business_df.columns.str.strip()
+    
+    # === Apply normalization ===
+    building_df["Address_clean"] = building_df["Address:"].fillna("").apply(normalize_address)
+    business_df["Street1_clean"] = business_df["Street1"].fillna("").apply(normalize_address)
+    
+    # === Merge on cleaned street fields ===
+    merged = pd.merge(
+        business_df,
+        building_df[["Address_clean", "Cleaned Group(s)"]],
+        left_on="Street1_clean",
+        right_on="Address_clean",
+        how="left"
+    )
+    
+    # Drop helper columns
+    merged = merged.drop(columns=["Street1_clean", "Address_clean"])
+    
+    # Filter only B and F (optional — same as notebook)
+    merged_filtered = merged[merged["Cleaned Group(s)"].isin(["B", "F"])]
+    
+    # Remove duplicates
+    merged_filtered = merged_filtered.drop_duplicates()
+    
+    # Save the result back to S3
+    csv_buffer = io.StringIO()
+    merged_filtered.to_csv(csv_buffer, index=False)
+    s3.put_object(Bucket=output_bucket, Key=output_key, Body=csv_buffer.getvalue())
+    
+    # Return basic success info
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f" {len(merged_filtered)} rows saved to s3://{output_bucket}/{output_key}")
+    }
