@@ -1,0 +1,183 @@
+import json
+import pandas as pd
+import boto3
+import io
+import os
+
+#Initial Cleaning includes:
+    #drop duplicates
+    #keep reuqired columns
+    #keep active businessess
+    #keep businesses in VA only
+    #transform IncorpDate to date format (m-d-y)
+    #add business type for classification
+
+# Define cleaning function for 'Officer.csv'
+def clean_officer_file(df):
+    df = df.apply(lambda x: x.str.replace(r'\t', '', regex=True) if x.dtype == "object" else x)
+    keep_columns = ['EntityID', 'OfficerLastName', 'OfficerFirstName', 'OfficerTitle']
+    df = df[keep_columns]
+    df = df.apply(lambda col: col.str.title().str.strip() if col.dtype == "object" else col)
+    df = df.fillna('x')
+    df = df.drop_duplicates()
+    df = df.reset_index(drop=True)
+    df = df.applymap(lambda x: 'x' if isinstance(x, str) and x.strip() == '' else x)
+    return df
+
+def clean_lp_file(df):
+    df = df.apply(lambda x: x.str.replace('\t', '', regex=False) if x.dtype == "object" else x)
+    keep_columns = ['EntityID','Name', 'Status', 'IncorpDate', 'IncorpState', 'Street1', 'Street2', 'City', 'State', 'Zip']
+    df = df[keep_columns]
+    df['Status'] = df['Status'].str.strip()
+    df['State'] = df['State'].str.strip()
+    df = df[(df['Status'] == 'ACTIVE') & (df['State'] == 'Virginia')]
+    df = df.drop_duplicates()
+    df = df.applymap(lambda x: x.title() if isinstance(x, str) else x)
+    df['IncorpDate'] = pd.to_datetime(df['IncorpDate']).dt.strftime('%m-%d-%Y')
+    df['Zip'] = df['Zip'].str.slice(0, 5)
+    df['BusinessType'] = 'LP'
+    return df
+
+def clean_llc_file(df):
+    df = df.apply(lambda x: x.str.replace('\t', '', regex=False) if x.dtype == "object" else x)
+    keep_columns = ['EntityID','Name', 'Status', 'IncorpDate', 'IncorpState', 'Street1', 'Street2', 'City', 'State', 'Zip']
+    df = df[keep_columns]
+    df['Status'] = df['Status'].str.strip()
+    df['State'] = df['State'].str.strip()
+    df = df[(df['Status'] == 'ACTIVE') & (df['State'] == 'Virginia')]
+    df = df.drop_duplicates()
+    df = df.applymap(lambda x: x.title() if isinstance(x, str) else x)
+    df['IncorpDate'] = pd.to_datetime(df['IncorpDate'], errors='coerce').dt.strftime('%m-%d-%Y')
+    df['Zip'] = df['Zip'].str.slice(0, 5)
+    df['BusinessType'] = 'LLC'
+    return df
+
+def clean_corp_file(df):
+    df = df.apply(lambda x: x.str.replace('\t', '', regex=False) if x.dtype == "object" else x)
+    keep_columns = ['EntityID','Name', 'Status', 'IncorpDate', 'IncorpState', 'Street1', 'Street2', 'City', 'State', 'Zip']
+    df = df[keep_columns]
+    df['Status'] = df['Status'].str.strip()
+    df['State'] = df['State'].str.strip()
+    df = df[(df['Status'] == 'ACTIVE') & (df['State'] == 'Virginia')]
+    df = df.drop_duplicates()
+    df = df.applymap(lambda x: x.title() if isinstance(x, str) else x)
+    df['IncorpDate'] = pd.to_datetime(df['IncorpDate'], errors='coerce').dt.strftime('%m-%d-%Y')
+    df['Zip'] = df['Zip'].str.slice(0, 5)
+    df['BusinessType'] = 'Corp'
+    return df
+
+def clean_gp_file(df):
+    df = df.apply(lambda x: x.str.replace('\t', '', regex=False) if x.dtype == "object" else x)
+    keep_columns = ['EntityID','Name', 'Status', 'IncorpDate', 'IncorpState', 'Street1', 'Street2', 'City', 'State', 'Zip']
+    df = df[keep_columns]
+    df['Status'] = df['Status'].str.strip()
+    df['State'] = df['State'].str.strip()
+    df = df[(df['Status'] == 'ACTIVE') & (df['State'] == 'Virginia')]
+    df = df.drop_duplicates()
+    df = df.applymap(lambda x: x.title() if isinstance(x, str) else x)
+    df['IncorpDate'] = pd.to_datetime(df['IncorpDate'], errors='coerce').dt.strftime('%m-%d-%Y')
+    df['Zip'] = df['Zip'].str.slice(0, 5)
+    df['BusinessType'] = 'GP'
+    return df
+
+def clean_building_type_file(df):
+    df = df.apply(lambda x: x.str.replace(r'\t', '', regex=True) if x.dtype == "object" else x)
+    df = df.apply(lambda col: col.str.title().str.strip() if col.dtype == "object" else col)
+    df = df.fillna('')
+    df = df.drop_duplicates()
+    df = df.reset_index(drop=True)
+    keep_columns = [
+        'Permit Number/ID:', 'Name:', 'Code/Year:', 'Group(s):', 
+        'Address:', 'City:', 'Zip Code:', 'GlobalID', 'XCords', 'YCords'
+    ]
+    df = df[keep_columns] if all(col in df.columns for col in keep_columns) else df
+    if 'Group(s):' in df.columns:
+        df['Cleaned Group(s)'] = df['Group(s):'].apply(lambda x: ''.join(filter(str.isalpha, x))[:1] if isinstance(x, str) else None)
+    df.columns = df.columns.str.strip()
+    return df
+
+cleaning_strategies = {
+    'Officer.csv': clean_officer_file,
+    'LP.csv': clean_lp_file,
+    'LLC.csv': clean_llc_file, 
+    'Corp.csv': clean_corp_file, 
+    'GP.csv': clean_gp_file,
+    'Building_Type_of_Construction.csv': clean_building_type_file
+}
+
+def lambda_handler(event, context):
+    s3 = boto3.client('s3')
+    bucket_name = event['Records'][0]['s3']['bucket']['name']
+    response = s3.list_objects_v2(Bucket=bucket_name)
+    files_to_process = response.get('Contents', [])
+
+    while response.get('IsTruncated'):
+        continuation_token = response.get('NextContinuationToken')
+        response = s3.list_objects_v2(Bucket=bucket_name, ContinuationToken=continuation_token)
+        files_to_process.extend(response.get('Contents', []))
+
+    cleaned_bucket = 'cleaned-fceda-data'
+    cleaned_prefix = 'cleaned_data/'
+    merged_bucket = 'merged-fceda-data'
+    merged_key = 'merged_data/joined_df.csv'
+    zip_bucket = 'gmu-fceda-project'
+    zip_key = 'ZIP_Codes.csv'
+
+#Join Businesses data together (LP,LLC,Corp,GP)
+business_dfs = []
+
+for file in files_to_process:
+    file_key = file['Key']
+    filename = os.path.basename(file_key)
+    print(f" Processing file: {file_key}")
+
+    try:
+        response = s3.get_object(Bucket=bucket_name, Key=file_key)
+        file_content = response['Body'].read()
+        df = pd.read_csv(io.BytesIO(file_content), dtype={'EntityID': str}, index_col=False)
+
+        cleaning_function = cleaning_strategies.get(filename)
+
+        if cleaning_function:
+            df_cleaned = cleaning_function(df)
+            cleaned_data = df_cleaned.to_csv(index=False).encode('utf-8')
+            cleaned_key = cleaned_prefix + filename 
+            s3.put_object(Bucket=cleaned_bucket, Key=cleaned_key, Body=cleaned_data)
+            print(f"Cleaned file uploaded to {cleaned_bucket}/{cleaned_key}")
+
+            if filename in ['LLC.csv', 'LP.csv', 'GP.csv', 'Corp.csv']:
+                business_dfs.append(df_cleaned)
+        else:
+            print(f"WARNING: File '{filename}' was skipped — no cleaning strategy found.")
+            print("Possible reasons: typo, unsupported file, or misnamed upload.")
+
+    except Exception as e:
+        print(f"Error processing file {file_key}: {e}")
+        continue
+
+#Join with FFX County Zipcode File for inital filtering (still contains businesses using shared zipcode with other county & Fairfax City)
+    if business_dfs:
+        try:
+            zip_obj = s3.get_object(Bucket=zip_bucket, Key=zip_key)
+            df_zip = pd.read_csv(io.BytesIO(zip_obj['Body'].read()))
+            df_zip['ZIPCODE'] = df_zip['ZIPCODE'].astype(str).str.strip()
+            df_zip = df_zip[['ZIPCODE', 'Shape__Area', 'Shape__Length']]
+
+            business_df = pd.concat(business_dfs, ignore_index=True)
+            business_df['Zip'] = business_df['Zip'].astype(str).str.strip()
+
+            df_joined = pd.merge(business_df, df_zip, left_on='Zip', right_on='ZIPCODE', how='left')
+            df_joined = df_joined[df_joined['ZIPCODE'].notna()]
+            df_joined.drop(columns=['Zip'], inplace=True)
+
+            merged_csv = df_joined.to_csv(index=False).encode('utf-8-sig')
+            s3.put_object(Bucket=merged_bucket, Key=merged_key, Body=merged_csv)
+            print(f"Joined file uploaded to {merged_bucket}/{merged_key}")
+
+        except Exception as e:
+            print(f"Error during merging: {e}")
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Files processed and merged successfully!')
+    }
